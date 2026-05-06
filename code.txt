@@ -1,0 +1,275 @@
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(GGally)
+library(modelr)
+library(MASS)
+library(tidyverse)
+library(tidyr)
+
+#Cleaning Data
+Cropdata <- read.csv("EcoCrop_DB.csv")
+Cropdata <- subset(Cropdata, select = -c(AUTH, EcoPortCode, FAMNAME, SYNO))
+factor_cols <- c("LIFO","HABI","LISPA","PHYS","PLAT","LIOPMN","LIOPMX",
+                 "LIMN","LIMX","DEP","DEPR","TEXT","TEXTR","FER","FERR",
+                 "TOX","TOXR","SAL","SALR","DRA","DRAR","PHOTO","CLIZ",
+                 "ABISUS","ABITOL","INTRI","PROSY")
+
+Cropdata[factor_cols] <- lapply(Cropdata[factor_cols], factor)
+
+Crop_noCAT <- Cropdata %>% 
+  filter(is.na(CAT) | CAT == "")
+
+Crop_withCAT <- Cropdata %>% 
+  filter(!(is.na(CAT) | CAT == ""))
+
+Crop_withCAT <- Crop_withCAT %>%
+  mutate(
+    CAT_clean = str_split(CAT, ",\\s*")   # split only on commas
+  ) %>%
+  mutate(
+    CAT_clean = lapply(CAT_clean, function(x) {
+      x <- trimws(x)      # remove leading/trailing spaces
+      x <- x[x != ""]     # remove empty strings
+      unique(x)           # remove duplicates if any
+    })
+  )
+
+Crop_long <- Crop_withCAT %>%
+  unnest(CAT_clean) %>%
+  rename(Category = CAT_clean)
+
+Cropsfinal <- Crop_long %>%
+  mutate(value = 1) %>%
+  pivot_wider(names_from = Category, values_from = value, values_fill = 0)
+
+Cropsfinal <- subset(Cropsfinal, select = -c(CAT, Column1))
+
+#cor(Cropdata[,-1])
+#signif(Cropdata[,-1])
+#ggpairs(Cropdata[,-1], cardinality_threshold = 400)
+
+#----------------------------------------------------------------
+#Assigning Yields
+
+faostat <- read.csv("FAOSTAT_data_en_8-18-2025.csv")
+category_map <- tribble(
+  ~Item, ~Category,
+  # Cereals & pseudocereals
+  "Wheat", "cereals",
+  "Rice", "cereals",
+  "Maize (corn)", "cereals",
+  "Barley", "cereals",
+  "Oats", "cereals",
+  "Rye", "cereals",
+  "Millet", "cereals",
+  "Sorghum", "cereals",
+  "Buckwheat", "cereals",
+  "Quinoa", "cereals",
+  "Mixed grain", "cereals",
+  
+  # Pulses
+  "Beans, dry", "pulses",
+  "Chick peas, dry", "pulses",
+  "Lentils, dry", "pulses",
+  "Peas, dry", "pulses",
+  "Cow peas, dry", "pulses",
+  "Pigeon peas, dry", "pulses",
+  "Bambara beans, dry", "pulses",
+  
+  # Roots & tubers
+  "Potatoes", "roots_tubers",
+  "Cassava, fresh", "roots_tubers",
+  "Sweet potatoes", "roots_tubers",
+  "Yams", "roots_tubers",
+  "Taro", "roots_tubers",
+  "Yautia", "roots_tubers",
+  
+  # Vegetables
+  "Tomatoes", "vegetables",
+  "Cabbages", "vegetables",
+  "Carrots and turnips", "vegetables",
+  "Cucumbers and gherkins", "vegetables",
+  "Eggplants (aubergines)", "vegetables",
+  "Lettuce and chicory", "vegetables",
+  "Onions and shallots, dry (excluding dehydrated)", "vegetables",
+  "Onions and shallots, green", "vegetables",
+  "Peas, green", "vegetables",
+  "Spinach", "vegetables",
+  "Pumpkins, squash and gourds", "vegetables",
+  "Other vegetables, fresh n.e.c.", "vegetables",
+  
+  # Fruits & nuts
+  "Apples", "fruits_nuts",
+  "Bananas", "fruits_nuts",
+  "Grapes", "fruits_nuts",
+  "Oranges", "fruits_nuts",
+  "Mangoes, guavas and mangosteens", "fruits_nuts",
+  "Pears", "fruits_nuts",
+  "Peaches and nectarines", "fruits_nuts",
+  "Strawberries", "fruits_nuts",
+  "Blueberries", "fruits_nuts",
+  "Watermelons", "fruits_nuts",
+  "Papayas", "fruits_nuts",
+  "Pineapples", "fruits_nuts",
+  "Avocados", "fruits_nuts",
+  
+  # Materials (fibres)
+  "Jute, raw or retted", "materials",
+  "Sisal, raw", "materials",
+  "True hemp, raw or retted", "materials",
+  "Ramie, raw or retted", "materials",
+  "Abaca, manila hemp, raw", "materials",
+  "Agave fibres, raw, n.e.c.", "materials",
+  
+  # Medicinals & aromatic
+  "Ginger, raw", "medicinal_aromatic",
+  "Cinnamon and cinnamon-tree flowers, raw", "medicinal_aromatic",
+  "Cloves (whole stems), raw", "medicinal_aromatic",
+  "Peppermint, spearmint", "medicinal_aromatic",
+  "Vanilla, raw", "medicinal_aromatic"
+)
+
+faostat_cat <- faostat %>%
+  left_join(category_map, by = "Item")
+
+category_yields <- faostat_cat %>%
+  filter(!is.na(Category)) %>%
+  group_by(Category) %>%
+  summarise(
+    mean_yield_kg_ha = mean(Value, na.rm = TRUE),
+    n_crops = n()
+  ) %>%
+  mutate(mean_yield_t_ha = mean_yield_kg_ha / 1000)
+
+forage_row <- tibble(
+  Category = "forage_pasture",
+  mean_yield_kg_ha = 17170,   # 17.17 t DM/ha/year
+  n_crops = 1,
+  mean_yield_t_ha = 17.17
+)
+
+category_yields_final <- bind_rows(category_yields, forage_row)
+
+category_cols <- names(Cropsfinal)[51:64]
+
+category_map <- c(
+  "cereals & pseudocereals" = "cereals",
+  "pulses (grain legumes)"  = "pulses",
+  "roots/tubers"            = "roots_tubers",
+  "vegetables"              = "vegetables",
+  "fruits & nuts"           = "fruits_nuts",
+  "materials"               = "materials",
+  "medicinals & aromatic"   = "medicinal_aromatic",
+  "forage/pasture"          = "forage_pasture"
+)
+
+yield_lookup <- setNames(category_yields_final$mean_yield_t_ha,
+                         category_yields_final$Category)
+
+Cropsfinal$assigned_yield_t_ha <- NA_real_
+
+for (i in seq_len(nrow(Cropsfinal))) {
+  
+  row_vals <- Cropsfinal[i, category_cols]
+  active_categories <- names(row_vals)[row_vals == 1]
+  faostat_cats <- category_map[active_categories]
+  faostat_cats <- faostat_cats[!is.na(faostat_cats)]
+
+  if (length(faostat_cats) == 0) {
+    Cropsfinal$assigned_yield_t_ha[i] <- NA
+    next
+  }
+  yields <- yield_lookup[faostat_cats]
+  Cropsfinal$assigned_yield_t_ha[i] <- mean(yields, na.rm = TRUE)
+}
+
+fallback_yield <- mean(category_yields_final$mean_yield_t_ha, na.rm = TRUE)
+#Used fallback yields
+cropsfull <- Cropsfinal %>%
+  mutate(
+    assigned_yield_t_ha = ifelse(
+      is.na(assigned_yield_t_ha),
+      fallback_yield,
+      assigned_yield_t_ha
+    )
+  )
+
+
+
+#--------------------------------------------------------------------------
+#Multilinear Regression and Reverse
+Cropsfinalnumeric <- Cropsfinal %>%
+  mutate(across(all_of(factor_cols), ~ as.numeric(.)))
+
+category_cols <- names(Cropsfinal)[51:64]
+
+model_data <- Cropsfinalnumeric %>%
+  select(
+    -ScientificName,
+    -COMNAME,
+    -all_of(category_cols)
+  )
+
+model_data <- model_data %>%
+  mutate(across(where(is.numeric),
+                ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+full_model <- lm(
+  assigned_yield_t_ha ~ .,
+  data = model_data
+)
+
+summary(full_model)
+
+auto_backward <- step(full_model, direction = "backward")
+summary(auto_backward)
+
+auto_results <- data.frame(
+  Predictor = rownames(summary(auto_backward)$coefficients),
+  P_value   = summary(auto_backward)$coefficients[, "Pr(>|t|)"]
+)
+
+manual_backward_full <- function(data, response = "assigned_yield_t_ha") {
+  predictors <- setdiff(names(data), response)
+  kept_under_05 <- c()
+  repeat {
+    f <- as.formula(
+      paste(response, "~", paste(predictors, collapse = " + "))
+    )
+    model <- lm(f, data = data)
+    sm <- summary(model)
+    pvals <- sm$coefficients[-1, "Pr(>|t|)"]
+    sig <- names(pvals[pvals < 0.05])
+    kept_under_05 <- unique(c(kept_under_05, sig))
+    if (length(predictors) == 1) {
+      message("Only one predictor left. Stopping.")
+      break
+    }
+    worst <- names(which.max(pvals))
+    message("Removing predictor: ", worst, " (p = ", round(max(pvals), 4), ")")
+    predictors <- predictors[predictors != worst]
+  }
+  list(
+    final_model = model,
+    significant_predictors = kept_under_05
+  )
+}
+
+manual_output <- manual_backward_full(model_data)
+manual_model <- manual_output$final_model
+summary(manual_model)
+
+manual_results <- data.frame(
+  Predictor = rownames(summary(manual_model)$coefficients),
+  P_value   = summary(manual_model)$coefficients[, "Pr(>|t|)"]
+)
+
+auto_results
+manual_results
+manual_output$significant_predictors
+
+#--------------------------------------------------------------------
+#Machine Learning
+
